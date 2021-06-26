@@ -1,17 +1,26 @@
-local format = string.format
-local loadstring = loadstring or load
-
 local uv = require "uv"
 local process = require "process".globalProcess()
 local los = require "los"
 
+local format = string.format
+local loadstring = loadstring or load
+
+-- Add saphire to preload to allow require "saphire" in scripts.
 local saphire = {}
 package.preload["saphire"] = function () return saphire end
 
-saphire.rebuild = false
+saphire.rebuild = false -- Force the rebuild of all recipes.
 
+-- Workers used while building.
 saphire.workers = {}
+
+-- Queued and finished coroutines.
 saphire.routines = {}
+
+-- Targets for building.
+saphire.targets = {}
+
+-- Messages
 saphire.messages = {}
 
 -- Store the cwd of each routine.
@@ -21,6 +30,9 @@ local ring = { "|", "/", "-", "\\"  }
 local ring_tick = 0
 local display_tick = 0
 
+--[[
+  Display current saphire status.
+]]
 function saphire.display()
   -- Some kind of display.
   ring_tick = (ring_tick + 1) % #ring
@@ -96,12 +108,19 @@ local function next_task()
   return
 end
 
+--[[
+  Run saphire with a function as main routine, this function
+  is not reentrant and must not be called recursively.
+
+  TODO: Reentrant saphire ?
+]]
 function saphire.run(f)
   local start_time = os.time()
 
   saphire.routines[1] = coroutine.create(f)
   saphire.next_task_coroutine = coroutine.create(next_task)
 
+  -- Timer to force display update.
   local timer = uv.new_timer()
   timer:start(0, 1000 / saphire.display_tick_rate, function ()
     coroutine.resume(saphire.coroutine)
@@ -112,6 +131,7 @@ function saphire.run(f)
 
     for i,w in ipairs(saphire.workers) do
       if not w then
+        -- Worker is available.
         local status, t = coroutine.resume(saphire.next_task_coroutine)
         if status and t then
           if saphire.no_vt then
@@ -136,7 +156,9 @@ function saphire.run(f)
   until not active
 
   timer:stop()
+  timer:close()
 
+  -- TODO: Improve display ? Failure count/graph ?
   local duration = os.difftime(os.time(), start_time)
 
   if #saphire.messages > 0 then
@@ -160,7 +182,23 @@ function saphire.run(f)
   end
 end
 
+-- Start a new task.
 function saphire.start_task(task, wid)
+  if saphire.dryrun then
+    local timer = uv.new_timer()
+    uv.timer_start(timer, 0, 0, function ()
+      timer:close()
+
+      task.completed = true
+      saphire.workers[wid] = false
+
+      coroutine.resume(saphire.coroutine)
+    end)
+    
+    task.completed = false
+    return task
+  end
+
   local stdout = uv.new_pipe(false)
   local stderr = uv.new_pipe(false)
 
@@ -224,7 +262,7 @@ function saphire.start_task(task, wid)
 
   task.handle = handle
   task.pid = pid
-
+  
   task.completed = false
   return task
 end
@@ -446,9 +484,11 @@ Usage:
   display-tick-rate: Change the number of tick needed to refresh the display.
   rebuild: Force the rebuild of all recipes.
   file: Force the Saphirefile.lua to use
+  dryrun: Only simulate tasks, don't do any task.
 
 ]] .. message .. "\n")
 end
+
 function saphire.main(arg)
   local worker_count = #uv.cpu_info()
   local saphirefile = "Saphirefile.lua"
@@ -479,6 +519,12 @@ function saphire.main(arg)
       if argument == "--rebuild" then
         saphire.rebuild = true
       end
+
+      if argument == "--dryrun" then
+        saphire.dryrun = true
+      end
+    else
+      saphire.targets[argument] = true
     end
   end
 
@@ -500,6 +546,9 @@ function saphire.main(arg)
 
     saphire.run(function ()
       local func, err = loadstring(f:read "*a", "Saphirefile.lua")
+      -- HACK: Fix require
+      getfenv(func).require = require
+
       f:close()
 
       if func then
@@ -521,5 +570,3 @@ if process.argv then
     print(err)
   end
 end
-
-return saphire
