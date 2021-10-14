@@ -9,7 +9,12 @@ local loadstring = loadstring or load
 local saphire = {}
 package.preload["saphire"] = function () return saphire end
 
-saphire.rebuild = false -- Force the rebuild of all recipes.
+-- Force the rebuild of all recipes.
+saphire.rebuild = false
+
+-- Use a round-robbin algorithm to select routines.
+-- May reduce idle time and improve speed, can cause cache issues.
+saphire.roundrobin = false
 
 -- Workers used while building.
 saphire.workers = {}
@@ -95,6 +100,10 @@ local function next_task()
               saphire.messages[#saphire.messages + 1] = format("\x1B[31merr: %s\x1B[0m", t)
             end
           end
+        end
+
+        if saphire.roundrobin then
+          break
         end
       end
     end
@@ -203,6 +212,7 @@ function saphire.start_task(task, wid)
   local stderr = uv.new_pipe(false)
 
   local close_callback = function (code)
+    task.completed = true
     saphire.workers[wid] = false
     task.handle:close()
     stdout:close()
@@ -242,9 +252,7 @@ function saphire.start_task(task, wid)
     }, close_callback)
   end
 
-  if handle == nil then
-    return
-  end
+  assert(handle ~= nil)
 
   uv.read_start(stdout, function(err, data)
     assert(not err, err)
@@ -429,6 +437,8 @@ function saphire.do_subdir(path, wait, saphirefile)
     end
   end
 
+  setfenv(func, { __index = _G })
+
   local co = coroutine.create(func)
 
   saphire.routines[#saphire.routines+1] = co
@@ -449,7 +459,7 @@ function saphire.map(t, func, ...)
   local t_new = {}
 
   for k,v in pairs(t) do
-    t_new[k] = func(v, ...)
+    t_new[k] = func(v, k, ...)
   end
 
   return t_new
@@ -485,6 +495,7 @@ Usage:
   rebuild: Force the rebuild of all recipes.
   file: Force the Saphirefile.lua to use
   dryrun: Only simulate tasks, don't do any task.
+  roundrobin: Use a round-robin algorithm to select task, check source code for more informations.
 
 ]] .. message .. "\n")
 end
@@ -523,6 +534,10 @@ function saphire.main(arg)
       if argument == "--dryrun" then
         saphire.dryrun = true
       end
+
+      if argument == "--roundrobin" then
+        saphire.roundrobin = true
+      end
     else
       saphire.targets[argument] = true
     end
@@ -559,6 +574,9 @@ function saphire.main(arg)
     end)
   end
 end
+
+package.preload["saphire-c"] = require "lib.saphire-c"
+package.preload["saphire-chain"] = require "lib.saphire-chain"
 
 if process.argv then
   saphire.coroutine = coroutine.create(saphire.main)

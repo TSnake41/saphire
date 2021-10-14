@@ -4,7 +4,8 @@ return {
   luvi = { },
   files = {
     "*.lua",
-    "LICENCE"
+    "LICENCE",
+    "lib/**"
   },
   dependencies = {
     "luvit/process",
