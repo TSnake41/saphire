@@ -9,6 +9,8 @@ local loadstring = loadstring or load
 local saphire = {}
 package.preload["saphire"] = function () return saphire end
 
+local Future = require "saphire-future"
+
 -- Force the rebuild of all recipes.
 saphire.rebuild = false
 
@@ -144,6 +146,9 @@ function saphire.run(f)
         local status, t = coroutine.resume(saphire.next_task_coroutine)
         if status and t then
           if saphire.no_vt then
+            if t.directory then
+              print("in: " .. t.directory)
+            end
             print(t.command)
           end
 
@@ -172,10 +177,10 @@ function saphire.run(f)
 
   if #saphire.messages > 0 then
     if saphire.no_vt then
-      print(format("Completed building, check messages (%gs)", duration))
+      print(format("Completed building, check messages (%gs)\n", duration))
     else
       io.write(format("\x1B[%dB", #saphire.workers + 1))
-      print(format("\x1B[33mCompleted building, check messages (%gs)\x1B[0m", duration))
+      print(format("\x1B[33mCompleted building, check messages (%gs)\x1B[0m\n", duration))
     end
 
     for i,msg in ipairs(saphire.messages) do
@@ -193,12 +198,14 @@ end
 
 -- Start a new task.
 function saphire.start_task(task, wid)
+  Future.into_future(task)
+
   if saphire.dryrun then
     local timer = uv.new_timer()
     uv.timer_start(timer, 0, 0, function ()
       timer:close()
 
-      task.completed = true
+      task:resolve()
       saphire.workers[wid] = false
 
       coroutine.resume(saphire.coroutine)
@@ -212,9 +219,11 @@ function saphire.start_task(task, wid)
   local stderr = uv.new_pipe(false)
 
   local close_callback = function (code)
-    task.completed = true
-    saphire.workers[wid] = false
+    task:resolve()
+    task.code = code
     task.handle:close()
+
+    saphire.workers[wid] = false
     stdout:close()
     stderr:close()
 
@@ -297,8 +306,8 @@ function saphire.do_single(task, wait)
 
     coroutine.yield(task)
 
-    while wait and not task.completed do
-      coroutine.yield() -- task isn't completed
+    if wait then
+      task:wait()
     end
   end
 end
@@ -317,39 +326,24 @@ function saphire.do_multi(tasks, wait)
     heap = tasks
   end
 
-  for i,task in ipairs(heap) do
+  -- Map heap elements into futures.
+  local futures = saphire.map(heap, function (task)
     if type(task) == "function" then
-      heap[i] = coroutine.create(task)
-      saphire.routines[#saphire.routines + 1] = heap[i]
-
-      -- Inherit cwd from current routine.
-      saphire.routines_cwd[heap[i]] = saphire.routines_cwd[coroutine.running()]
-    else
-      task.directory = uv.cwd()
+      return Future():wrap_function(task)
+    elseif type(task) == "table" then
+      coroutine.yield(task) -- start task to make it a future
+      return task
+    elseif type(task) == "string" then
+      local task = { command = task }
       coroutine.yield(task)
+      return task
+    else
+      error("Invalid task type " .. type(task))
     end
-  end
+  end)
 
-  local completed = false
-
-  while wait and not completed do
-    completed = true
-
-    for i,task in ipairs(heap) do
-      if type(task) == "thread" then
-        if coroutine.status(task) ~= "dead" then
-          completed = false
-          break
-        end
-      elseif type(task) == "table" then
-        if not task.completed then
-          completed = false
-          break
-        end
-      end
-    end
-
-    coroutine.yield()
+  if wait then
+    Future.wait_all(futures)
   end
 end
 
@@ -394,7 +388,13 @@ function saphire.do_recipe(recipe, target, task, wait)
     end
 
     if not missing_target and not is_newer(newest_recipe, oldest_target) then
-      -- Nothing to do
+      -- Nothing to do, resolve task if needed
+      saphire.messages[#saphire.messages + 1] = format("\x1B[90mSkipped %s\x1B[0m", table.concat(target, ", "))
+
+      if type(task) == "table" then
+        Future.into_future(task)
+        task:resolve()
+      end
       return
     end
   end
@@ -407,7 +407,7 @@ function saphire.do_recipe(recipe, target, task, wait)
 end
 
 -- Build a subdirectory with a Saphirefile.lua (can be overriden with saphirefile parameter).
-function saphire.do_subdir(path, wait, saphirefile)
+function saphire.do_subdir(path, wait, saphirefile, ...)
   local cwd = uv.cwd()
   local func, err
 
@@ -437,10 +437,11 @@ function saphire.do_subdir(path, wait, saphirefile)
     end
   end
 
-  setfenv(func, { __index = _G })
+  --setfenv(func, { __index = _G })
 
   local co = coroutine.create(func)
-
+  getfenv(func).arg = { ... }
+  
   saphire.routines[#saphire.routines+1] = co
   saphire.routines_cwd[co] = uv.cwd() -- subdir cwd
 
@@ -574,9 +575,6 @@ function saphire.main(arg)
     end)
   end
 end
-
-package.preload["saphire-c"] = require "lib.saphire-c"
-package.preload["saphire-chain"] = require "lib.saphire-chain"
 
 if process.argv then
   saphire.coroutine = coroutine.create(saphire.main)

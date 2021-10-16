@@ -5,7 +5,7 @@ return {
   files = {
     "*.lua",
     "LICENCE",
-    "lib/**"
+    "libs/**"
   },
   dependencies = {
     "luvit/process",
