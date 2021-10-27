@@ -39,7 +39,7 @@ local function future_wrapper(future, f)
   if status then
     future:resolve(obj)
   else
-    saphire.messages[#saphire.message + 1] = string.format("\x1B[31merr: Future wrapper failure : %s\x1B[0m", obj)
+    saphire.messages[#saphire.messages + 1] = string.format("\x1B[31merr: Future wrapper failure : %s\x1B[0m", obj)
     future:reject(obj)
   end
 end
